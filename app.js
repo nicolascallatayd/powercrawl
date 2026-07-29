@@ -27,9 +27,9 @@ const DELAY_MS = 1500;
 const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet";
 const FALLBACK_ANTHROPIC_MODELS = [
   "claude-3-5-sonnet-latest",
+  "claude-3-5-haiku-latest",
   "claude-3-7-sonnet-latest",
   "claude-3-7-sonnet",
-  "claude-3-5-haiku-latest",
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,7 +49,7 @@ function isModelNotFoundError(err) {
 
 async function createAnthropicMessage(client, prompt, onFallback) {
   const preferredModel = process.env.ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL;
-  const models = [preferredModel, ...FALLBACK_ANTHROPIC_MODELS];
+  const models = [preferredModel, ...FALLBACK_ANTHROPIC_MODELS].filter(Boolean);
   const uniqueModels = models.filter(
     (model, index) => models.indexOf(model) === index,
   );
