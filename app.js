@@ -102,6 +102,17 @@ function sseSend(res, type, data) {
   res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
 }
 
+function buildHeuristicConfig(startUrl) {
+  return {
+    start_url: startUrl,
+    category_links: "a[href]",
+    company_links: "a[href]",
+    website_url: "a[href]",
+    next_page: null,
+    notes: "heuristic fallback because Anthropic model detection failed",
+  };
+}
+
 export function createApp() {
   const app = express();
   app.use(express.json());
@@ -217,32 +228,37 @@ ${categoryPageHtml ? `PAGE 2 (category ${categoryPageUrl}):\n${truncate(category
 
 ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPageHtml, 3000)}` : "PAGE 3: unavailable"}`;
 
-      const client = createClient();
-      const message = await createAnthropicMessage(
-        client,
-        prompt,
-        (attemptedModel, fallbackModel) => {
-          sseSend(res, "log", {
-            msg: `Anthropic model ${attemptedModel} was unavailable; retrying with ${fallbackModel}`,
-          });
-        },
-      );
-
-      const raw = message.content[0].text
-        .trim()
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/```\s*$/i, "")
-        .trim();
-
+      let config;
       try {
-        const config = JSON.parse(raw);
-        writeConfig(config);
-        sseSend(res, "config", { config });
-        sseSend(res, "done", { msg: "Detection complete" });
-      } catch {
-        sseSend(res, "error", { msg: "Claude returned invalid JSON", raw });
+        const client = createClient();
+        const message = await createAnthropicMessage(
+          client,
+          prompt,
+          (attemptedModel, fallbackModel) => {
+            sseSend(res, "log", {
+              msg: `Anthropic model ${attemptedModel} was unavailable; retrying with ${fallbackModel}`,
+            });
+          },
+        );
+
+        const raw = message.content[0].text
+          .trim()
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/```\s*$/i, "")
+          .trim();
+
+        config = JSON.parse(raw);
+      } catch (err) {
+        config = buildHeuristicConfig(startUrl);
+        sseSend(res, "log", {
+          msg: `Anthropic analysis unavailable; using heuristic fallback config: ${err.message}`,
+        });
       }
+
+      writeConfig(config);
+      sseSend(res, "config", { config });
+      sseSend(res, "done", { msg: "Detection complete" });
     } catch (err) {
       sseSend(res, "error", { msg: `Detect failed: ${err.message}` });
     } finally {

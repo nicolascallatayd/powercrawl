@@ -209,7 +209,7 @@ describe("detect error handling", () => {
     expect(res.text).toContain("Could not fetch URL");
   });
 
-  it("does not crash and emits an SSE error event when the AI call fails", async () => {
+  it("does not crash and emits an SSE log event when the AI call fails", async () => {
     anthropicCreateMock.mockRejectedValueOnce(new Error("boom"));
 
     const agent = request.agent(app);
@@ -218,7 +218,8 @@ describe("detect error handling", () => {
       .get("/api/detect")
       .query({ url: "https://example.com" });
     expect(res.status).toBe(200);
-    expect(res.text).toContain('"type":"error"');
+    expect(res.text).toContain('"type":"config"');
+    expect(res.text).toContain("heuristic fallback");
   });
 
   it("falls back to a supported model when the preferred model is not found", async () => {
@@ -258,6 +259,26 @@ describe("detect error handling", () => {
     expect(anthropicCreateMock.mock.calls[1][0].model).toBe(
       "claude-3-5-sonnet-latest",
     );
+  });
+
+  it("uses a heuristic config when all Anthropic model attempts fail", async () => {
+    const unsupportedError = Object.assign(
+      new Error("model: claude-3-7-sonnet"),
+      {
+        status: 404,
+        type: "not_found_error",
+      },
+    );
+    anthropicCreateMock.mockRejectedValue(unsupportedError);
+
+    const agent = request.agent(app);
+    await login(agent);
+    const res = await agent
+      .get("/api/detect")
+      .query({ url: "https://example.com" });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('"type":"config"');
+    expect(res.text).toContain("heuristic fallback");
   });
 
   it("succeeds and saves config on the happy path", async () => {
