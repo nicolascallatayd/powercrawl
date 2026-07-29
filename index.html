@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="api-base-url" content="" />
+<title>URL Extractor</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --surface2: #18181f;
+    --border: #2a2a35;
+    --accent: #7c3aed;
+    --accent2: #a855f7;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --text: #e2e2f0;
+    --muted: #6b6b80;
+    --mono: 'DM Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; overflow-x: hidden; }
+
+  /* Ambient glow */
+  body::before {
+    content: '';
+    position: fixed; top: -200px; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 400px;
+    background: radial-gradient(ellipse, rgba(124,58,237,0.15) 0%, transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+
+  header {
+    padding: 32px 40px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+    position: relative; z-index: 1;
+  }
+  .logo {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  header span { font-size: 13px; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+
+  .layout { display: grid; grid-template-columns: 360px 1fr; height: calc(100vh - 81px); position: relative; z-index: 1; }
+
+  /* LEFT PANEL */
+  .panel-left {
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  .section { padding: 24px; border-bottom: 1px solid var(--border); }
+  .section-title {
+    font-size: 10px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::before { content: ''; display: block; width: 3px; height: 12px; background: var(--accent); border-radius: 2px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-family: var(--mono); }
+  input[type="text"], textarea {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 10px 12px; outline: none; transition: border-color 0.2s;
+  }
+  input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 18px; border-radius: 6px; font-family: var(--sans); font-size: 13px;
+    font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; width: 100%;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent2); transform: translateY(-1px); }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
+  .btn-success { background: rgba(34,197,94,0.15); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+  .btn-success:hover:not(:disabled) { background: rgba(34,197,94,0.25); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+  .btn-row { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+
+  /* Config fields */
+  .config-grid { display: flex; flex-direction: column; gap: 10px; }
+  .config-field label { color: var(--accent2); }
+
+  /* Status badge */
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 20px; font-size: 11px; font-family: var(--mono);
+    background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .status-badge.running { border-color: var(--accent); color: var(--accent2); }
+  .status-badge.done { border-color: var(--green); color: var(--green); }
+  .status-badge.error { border-color: var(--red); color: var(--red); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  /* STATS ROW */
+  .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-card {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; text-align: center;
+  }
+  .stat-num { font-size: 28px; font-weight: 800; font-family: var(--mono); color: var(--accent2); line-height: 1; }
+  .stat-label { font-size: 10px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* RIGHT PANEL — LOG + URLS */
+  .panel-right { display: grid; grid-template-rows: 1fr 1fr; overflow: hidden; }
+
+  .pane { display: flex; flex-direction: column; overflow: hidden; }
+  .pane-header {
+    padding: 14px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--muted); flex-shrink: 0;
+  }
+  .pane-header .count {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 2px 8px; font-family: var(--mono); font-size: 11px; color: var(--accent2);
+  }
+
+  .log-scroll, .url-scroll {
+    flex: 1; overflow-y: auto; padding: 16px 24px;
+    font-family: var(--mono); font-size: 12px; line-height: 1.7;
+  }
+  .log-scroll::-webkit-scrollbar, .url-scroll::-webkit-scrollbar { width: 4px; }
+  .log-scroll::-webkit-scrollbar-thumb, .url-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-line { color: var(--muted); padding: 1px 0; }
+  .log-line.cat { color: var(--accent2); font-weight: 500; }
+  .log-line.err { color: var(--red); }
+
+  .url-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 0; border-bottom: 1px solid rgba(42,42,53,0.5); color: var(--text);
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+  .url-item .idx { color: var(--muted); min-width: 36px; text-align: right; font-size: 11px; }
+  .url-item a { color: var(--accent2); text-decoration: none; }
+  .url-item a:hover { color: #fff; text-decoration: underline; }
+
+  .divider { height: 1px; background: var(--border); }
+
+  .empty-state { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+
+  /* Progress bar */
+  .progress-wrap { padding: 0 24px 16px; }
+  .progress-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; transition: width 0.4s ease; width: 0%; }
+
+  .mt8 { margin-top: 8px; }
+  .mt16 { margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">🔗</div>
+  <h1>URL Extractor</h1>
+  <span id="statusBadge" class="status-badge"><span class="dot"></span> idle</span>
+</header>
+
+<div class="layout">
+  <!-- LEFT -->
+  <div class="panel-left">
+
+    <div class="section">
+      <div class="section-title">Target Directory</div>
+      <label>Directory Homepage URL</label>
+      <input type="text" id="startUrl" placeholder="https://www.some-b2b-directory.com" />
+      <div class="btn-row mt8">
+        <button class="btn btn-primary" id="btnDetect">🤖 Auto-detect Structure</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">CSS Selectors Config</div>
+      <div class="config-grid" id="configGrid">
+        <div class="config-field">
+          <label>category_links</label>
+          <input type="text" id="cfg_category_links" placeholder="a.category-link" />
+        </div>
+        <div class="config-field">
+          <label>company_links</label>
+          <input type="text" id="cfg_company_links" placeholder="a.company-name" />
+        </div>
+        <div class="config-field">
+          <label>website_url</label>
+          <input type="text" id="cfg_website_url" placeholder="a.company-website" />
+        </div>
+        <div class="config-field">
+          <label>next_page</label>
+          <input type="text" id="cfg_next_page" placeholder="a.next-page (leave blank if none)" />
+        </div>
+        <div class="config-field">
+          <label>notes (from AI)</label>
+          <textarea id="cfg_notes" rows="2" placeholder="AI notes will appear here after detection"></textarea>
+        </div>
+      </div>
+      <div class="btn-row mt8">
+        <button class="btn btn-secondary" id="btnSaveConfig">💾 Save Config</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Run</div>
+      <div class="stats-row">
+        <div class="stat-card"><div class="stat-num" id="statUrls">0</div><div class="stat-label">URLs Found</div></div>
+        <div class="stat-card"><div class="stat-num" id="statCats">0</div><div class="stat-label">Categories</div></div>
+      </div>
+      <div class="btn-row mt16">
+        <button class="btn btn-primary" id="btnScrape" disabled>▶ Start Scrape</button>
+        <button class="btn btn-success" id="btnDownload" disabled>⬇ Download leads.txt</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT -->
+  <div class="panel-right">
+
+    <div class="pane">
+      <div class="pane-header">
+        Activity Log
+        <button class="btn btn-secondary" style="width:auto;padding:4px 10px;font-size:11px;" onclick="document.getElementById('logScroll').innerHTML=''">Clear</button>
+      </div>
+      <div class="log-scroll" id="logScroll">
+        <div class="empty-state">Logs will appear here when you run a detection or scrape.</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="pane">
+      <div class="pane-header">
+        Extracted URLs
+        <span class="count" id="urlCount">0</span>
+      </div>
+      <div class="progress-wrap"><div class="progress-track"><div class="progress-fill" id="progressFill"></div></div></div>
+      <div class="url-scroll" id="urlScroll">
+        <div class="empty-state" id="urlEmpty">Extracted URLs will stream in here during the scrape.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let urlCount = 0;
+let catCount = 0;
+let totalCats = 0;
+let running = false;
+const API_BASE_URL = document.querySelector('meta[name="api-base-url"]').content.trim() || '';
+
+function setStatus(state, label) {
+  const el = document.getElementById('statusBadge');
+  el.className = 'status-badge ' + state;
+  const dot = state === 'running' ? '<span class="dot pulse"></span>' : '<span class="dot"></span>';
+  el.innerHTML = dot + ' ' + label;
+}
+
+function log(msg, cls = '') {
+  const el = document.getElementById('logScroll');
+  const empty = el.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function addUrl(url, idx) {
+  const el = document.getElementById('urlScroll');
+  const empty = el.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const item = document.createElement('div');
+  item.className = 'url-item';
+  item.innerHTML = `<span class="idx">${idx}</span><a href="${url}" target="_blank">${url}</a>`;
+  el.appendChild(item);
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('urlCount').textContent = idx;
+  document.getElementById('statUrls').textContent = idx;
+  if (totalCats > 0) {
+    document.getElementById('progressFill').style.width = Math.min(100, (catCount / totalCats) * 100) + '%';
+  }
+}
+
+function setSelectors(cfg) {
+  document.getElementById('cfg_category_links').value = cfg.category_links || '';
+  document.getElementById('cfg_company_links').value  = cfg.company_links  || '';
+  document.getElementById('cfg_website_url').value    = cfg.website_url    || '';
+  document.getElementById('cfg_next_page').value      = cfg.next_page      || '';
+  document.getElementById('cfg_notes').value          = cfg.notes          || '';
+  document.getElementById('startUrl').value           = cfg.start_url      || document.getElementById('startUrl').value;
+}
+
+function getConfigFromFields() {
+  return {
+    start_url:      document.getElementById('startUrl').value.trim(),
+    category_links: document.getElementById('cfg_category_links').value.trim(),
+    company_links:  document.getElementById('cfg_company_links').value.trim(),
+    website_url:    document.getElementById('cfg_website_url').value.trim(),
+    next_page:      document.getElementById('cfg_next_page').value.trim() || null,
+    notes:          document.getElementById('cfg_notes').value.trim(),
+  };
+}
+
+function openSSE(url, onMsg, onDone) {
+  const es = new EventSource(url);
+  es.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    onMsg(d);
+    if (d.type === 'done' || d.type === 'error') { es.close(); onDone(d); }
+  };
+  es.onerror = () => { es.close(); onDone({ type: 'error', msg: 'Connection lost' }); };
+}
+
+// Load existing config on page load
+fetch(`${API_BASE_URL}/api/config`).then(r => r.json()).then(cfg => { if (cfg) { setSelectors(cfg); document.getElementById('btnScrape').disabled = false; } });
+
+// DETECT
+document.getElementById('btnDetect').addEventListener('click', () => {
+  const url = document.getElementById('startUrl').value.trim();
+  if (!url) return alert('Enter a directory URL first');
+  if (running) return;
+  running = true;
+  setStatus('running', 'detecting');
+  document.getElementById('btnDetect').disabled = true;
+  document.getElementById('btnScrape').disabled = true;
+  log('Starting auto-detection for: ' + url);
+
+  openSSE(`${API_BASE_URL}/api/detect?url=` + encodeURIComponent(url), (d) => {
+    if (d.type === 'log')    log(d.msg);
+    if (d.type === 'config') { setSelectors(d.config); log('Config saved ✓', ''); }
+    if (d.type === 'error')  log('ERROR: ' + d.msg, 'err');
+  }, (d) => {
+    running = false;
+    document.getElementById('btnDetect').disabled = false;
+    document.getElementById('btnScrape').disabled = false;
+    setStatus(d.type === 'done' ? 'done' : 'error', d.type === 'done' ? 'detected' : 'error');
+  });
+});
+
+// SAVE CONFIG
+document.getElementById('btnSaveConfig').addEventListener('click', () => {
+  fetch(`${API_BASE_URL}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(getConfigFromFields()) })
+    .then(() => { log('Config saved manually ✓'); document.getElementById('btnScrape').disabled = false; });
+});
+
+// SCRAPE
+document.getElementById('btnScrape').addEventListener('click', () => {
+  if (running) return;
+  running = true;
+  urlCount = 0; catCount = 0; totalCats = 0;
+  document.getElementById('urlScroll').innerHTML = '<div class="empty-state" id="urlEmpty">Streaming URLs...</div>';
+  document.getElementById('urlCount').textContent = '0';
+  document.getElementById('statUrls').textContent = '0';
+  document.getElementById('statCats').textContent = '0';
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('btnScrape').disabled = true;
+  document.getElementById('btnDownload').disabled = true;
+  setStatus('running', 'scraping');
+  log('Starting scrape...');
+
+  openSSE(`${API_BASE_URL}/api/scrape`, (d) => {
+    if (d.type === 'log')      log(d.msg);
+    if (d.type === 'category') {
+      catCount++;
+      totalCats = d.total || totalCats;
+      document.getElementById('statCats').textContent = catCount;
+      log(d.msg, 'cat');
+    }
+    if (d.type === 'url') {
+      urlCount = d.total;
+      addUrl(d.url, d.total);
+    }
+    if (d.type === 'error') log('ERROR: ' + d.msg, 'err');
+  }, (d) => {
+    running = false;
+    document.getElementById('btnScrape').disabled = false;
+    document.getElementById('btnDownload').disabled = false;
+    document.getElementById('progressFill').style.width = '100%';
+    setStatus(d.type === 'done' ? 'done' : 'error', d.type === 'done' ? `done (${urlCount} URLs)` : 'error');
+    log(d.msg || 'Finished');
+  });
+});
+
+// DOWNLOAD
+document.getElementById('btnDownload').addEventListener('click', () => { window.location = `${API_BASE_URL}/api/download`; });
+</script>
+</body>
+</html>

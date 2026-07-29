@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Email Extractor</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #080b10;
+    --surface: #0d1117;
+    --surface2: #161b22;
+    --border: #21262d;
+    --accent: #0ea5e9;
+    --accent2: #38bdf8;
+    --green: #22c55e;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --text: #cdd9e5;
+    --muted: #4d5a6a;
+    --mono: 'DM Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; overflow-x: hidden; }
+
+  body::before {
+    content: ''; position: fixed; top: -150px; right: -100px;
+    width: 500px; height: 500px;
+    background: radial-gradient(ellipse, rgba(14,165,233,0.08) 0%, transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+
+  header {
+    padding: 28px 40px 22px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px;
+    position: relative; z-index: 1;
+  }
+  .logo {
+    width: 34px; height: 34px;
+    background: linear-gradient(135deg, var(--accent), #0284c7);
+    border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.3px; }
+  .status-badge {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 20px; font-size: 11px; font-family: var(--mono);
+    background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .status-badge.running { border-color: var(--accent); color: var(--accent2); }
+  .status-badge.done    { border-color: var(--green);  color: var(--green);  }
+  .status-badge.error   { border-color: var(--red);    color: var(--red);    }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+  .dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .layout { display: grid; grid-template-columns: 380px 1fr; height: calc(100vh - 79px); position: relative; z-index: 1; }
+
+  .panel-left {
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+
+  .section { padding: 22px 24px; border-bottom: 1px solid var(--border); }
+  .section-title {
+    font-size: 10px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::before { content:''; display:block; width:3px; height:12px; background:var(--accent); border-radius:2px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; font-family: var(--mono); }
+
+  textarea {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: var(--mono); font-size: 11.5px;
+    padding: 10px 12px; outline: none; transition: border-color 0.2s; resize: vertical;
+  }
+  textarea:focus { border-color: var(--accent); }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 18px; border-radius: 6px; font-family: var(--sans); font-size: 13px;
+    font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; width: 100%;
+  }
+  .btn-primary  { background: var(--accent); color: #000; }
+  .btn-primary:hover:not(:disabled)  { background: var(--accent2); transform: translateY(-1px); }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
+  .btn-success  { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+  .btn-success:hover:not(:disabled) { background: rgba(34,197,94,0.22); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+  .btn-row { display: flex; flex-direction: column; gap: 8px; }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat-card {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 10px; text-align: center;
+  }
+  .stat-num { font-size: 26px; font-weight: 800; font-family: var(--mono); color: var(--accent2); line-height: 1; }
+  .stat-label { font-size: 9px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* PROGRESS BAR */
+  .prog-wrap { padding: 0 24px 4px; }
+  .prog-meta { display: flex; justify-content: space-between; font-size: 11px; font-family: var(--mono); color: var(--muted); margin-bottom: 6px; }
+  .prog-track { height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+  .prog-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); width: 0%; transition: width 0.4s ease; border-radius: 2px; }
+
+  /* RIGHT PANEL */
+  .panel-right { display: flex; flex-direction: column; overflow: hidden; }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tab {
+    padding: 14px 24px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px;
+    cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; transition: all 0.15s;
+    text-transform: uppercase;
+  }
+  .tab.active { color: var(--accent2); border-bottom-color: var(--accent); }
+  .tab .badge {
+    display: inline-block; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1px 7px; font-size: 10px; margin-left: 6px; font-family: var(--mono);
+    color: var(--accent2);
+  }
+
+  .tab-content { flex: 1; overflow-y: auto; padding: 16px 24px; font-family: var(--mono); font-size: 12px; }
+  .tab-content::-webkit-scrollbar { width: 4px; }
+  .tab-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Log entries */
+  .log-line { padding: 2px 0; line-height: 1.6; color: var(--muted); }
+  .log-line.site   { color: var(--accent2); }
+  .log-line.hit    { color: var(--green); }
+  .log-line.miss   { color: var(--muted); opacity: 0.6; }
+  .log-line.err    { color: var(--red); }
+
+  /* Email entries */
+  .email-group { margin-bottom: 16px; animation: fadeIn 0.3s ease; }
+  .email-site { font-size: 11px; color: var(--muted); margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .email-item {
+    display: flex; align-items: center; gap: 10px; padding: 4px 0;
+  }
+  .email-item .num { color: var(--muted); min-width: 30px; text-align: right; font-size: 11px; }
+  .email-addr { color: var(--accent2); }
+  .copy-btn {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    color: var(--muted); font-size: 10px; padding: 1px 6px; cursor: pointer; font-family: var(--mono);
+    transition: all 0.15s; margin-left: auto;
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent2); }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .empty-state { color: var(--muted); font-size: 13px; padding: 32px 0; text-align: center; }
+  .mt12 { margin-top: 12px; }
+  .mt16 { margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">✉</div>
+  <h1>Email Extractor</h1>
+  <span id="statusBadge" class="status-badge"><span class="dot"></span> idle</span>
+</header>
+
+<div class="layout">
+  <!-- LEFT -->
+  <div class="panel-left">
+
+    <div class="section">
+      <div class="section-title">Input URLs</div>
+      <label>Paste website URLs (one per line)</label>
+      <textarea id="urlInput" rows="10" placeholder="https://company-one.com&#10;https://company-two.pl&#10;https://company-three.de"></textarea>
+      <div class="mt12" style="display:flex;gap:8px;">
+        <button class="btn btn-secondary" id="btnLoad" style="flex:1;font-size:12px;">📂 Load leads.txt</button>
+        <button class="btn btn-secondary" id="btnClear" style="flex:0 0 auto;width:auto;padding:10px 14px;font-size:12px;">✕</button>
+      </div>
+      <input type="file" id="fileInput" accept=".txt" style="display:none" />
+    </div>
+
+    <div class="section">
+      <div class="section-title">Stats</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-num" id="statTotal">0</div><div class="stat-label">Total Sites</div></div>
+        <div class="stat-card"><div class="stat-num" id="statHits">0</div><div class="stat-label">With Email</div></div>
+        <div class="stat-card"><div class="stat-num" id="statEmails">0</div><div class="stat-label">Emails</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Run</div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btnRun">▶ Extract Emails</button>
+        <button class="btn btn-success" id="btnDownload" disabled>⬇ Download emails.txt</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT -->
+  <div class="panel-right">
+
+    <div class="tabs">
+      <div class="tab active" data-tab="log">Activity Log</div>
+      <div class="tab" data-tab="emails">Emails <span class="badge" id="emailBadge">0</span></div>
+    </div>
+
+    <div class="prog-wrap" style="padding-top:12px;">
+      <div class="prog-meta">
+        <span id="progLabel">—</span>
+        <span id="progPct">0%</span>
+      </div>
+      <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
+    </div>
+
+    <div class="tab-content">
+      <div class="tab-pane active" id="pane-log">
+        <div class="empty-state" id="logEmpty">Activity will stream here when extraction runs.</div>
+      </div>
+      <div class="tab-pane" id="pane-emails">
+        <div class="empty-state" id="emailEmpty">Found emails will appear here.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+let totalSites = 0, processed = 0, hits = 0, emailCount = 0;
+let running = false;
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('pane-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+function setStatus(state, label) {
+  const el = document.getElementById('statusBadge');
+  el.className = 'status-badge ' + state;
+  const dot = state === 'running' ? '<span class="dot pulse"></span>' : '<span class="dot"></span>';
+  el.innerHTML = dot + ' ' + label;
+}
+
+function log(msg, cls = '') {
+  const pane = document.getElementById('pane-log');
+  const empty = document.getElementById('logEmpty');
+  if (empty) empty.remove();
+  const line = document.createElement('div');
+  line.className = 'log-line ' + cls;
+  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+  pane.appendChild(line);
+  pane.parentElement.scrollTop = pane.parentElement.scrollHeight;
+}
+
+function addEmails(url, emails) {
+  const pane = document.getElementById('pane-emails');
+  const empty = document.getElementById('emailEmpty');
+  if (empty) empty.remove();
+  const group = document.createElement('div');
+  group.className = 'email-group';
+  group.innerHTML = `<div class="email-site">${url}</div>`;
+  emails.forEach(email => {
+    emailCount++;
+    const item = document.createElement('div');
+    item.className = 'email-item';
+    item.innerHTML = `
+      <span class="num">${emailCount}</span>
+      <span class="email-addr">${email}</span>
+      <button class="copy-btn" onclick="navigator.clipboard.writeText('${email}');this.textContent='✓';setTimeout(()=>this.textContent='copy',1000)">copy</button>`;
+    group.appendChild(item);
+  });
+  pane.appendChild(group);
+  document.getElementById('emailBadge').textContent = emailCount;
+  document.getElementById('statEmails').textContent = emailCount;
+}
+
+function updateProgress() {
+  const pct = totalSites > 0 ? Math.round((processed / totalSites) * 100) : 0;
+  document.getElementById('progFill').style.width = pct + '%';
+  document.getElementById('progPct').textContent = pct + '%';
+  document.getElementById('progLabel').textContent = `${processed} / ${totalSites} sites`;
+}
+
+// Load .txt file
+document.getElementById('btnLoad').addEventListener('click', () => document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => { document.getElementById('urlInput').value = ev.target.result.trim(); };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+document.getElementById('btnClear').addEventListener('click', () => { document.getElementById('urlInput').value = ''; });
+
+// RUN
+document.getElementById('btnRun').addEventListener('click', () => {
+  if (running) return;
+  const raw = document.getElementById('urlInput').value.trim();
+  if (!raw) return alert('Paste some URLs or load a leads.txt file first');
+  const urls = raw.split('\n').map(u => u.trim()).filter(Boolean);
+  if (urls.length === 0) return alert('No valid URLs found');
+
+  running = true;
+  totalSites = urls.length; processed = 0; hits = 0; emailCount = 0;
+  document.getElementById('statTotal').textContent = urls.length;
+  document.getElementById('statHits').textContent = '0';
+  document.getElementById('statEmails').textContent = '0';
+  document.getElementById('emailBadge').textContent = '0';
+  document.getElementById('pane-log').innerHTML = '';
+  document.getElementById('pane-emails').innerHTML = '';
+  document.getElementById('btnRun').disabled = true;
+  document.getElementById('btnDownload').disabled = true;
+  setStatus('running', 'extracting');
+  updateProgress();
+
+  fetch('/api/extract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls })
+  }).then(res => {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    function processChunk({ done, value }) {
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      lines.forEach(line => {
+        if (!line.startsWith('data: ')) return;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.type === 'start')    { log(`Starting extraction for ${d.total} URLs`); }
+          if (d.type === 'site')     { log(`[${d.index}/${d.total}] Checking: ${d.url}`, 'site'); }
+          if (d.type === 'emails')   { hits++; processed++; document.getElementById('statHits').textContent = hits; addEmails(d.url, d.emails); log(`  ✓ ${d.emails.length} email(s) found`, 'hit'); updateProgress(); }
+          if (d.type === 'noemails') { processed++; log(`  – no emails`, 'miss'); updateProgress(); }
+          if (d.type === 'error')    { log('ERROR: ' + d.msg, 'err'); }
+          if (d.type === 'done')     {
+            running = false;
+            document.getElementById('btnRun').disabled = false;
+            document.getElementById('btnDownload').disabled = false;
+            document.getElementById('progFill').style.width = '100%';
+            document.getElementById('progPct').textContent = '100%';
+            setStatus('done', `done — ${d.totalEmails} emails`);
+            log(`✅ Complete: ${d.totalEmails} emails from ${d.sitesWithEmails}/${d.totalSites} sites`, 'hit');
+          }
+        } catch {}
+      });
+      return reader.read().then(processChunk);
+    }
+    return reader.read().then(processChunk);
+  }).catch(err => {
+    running = false;
+    setStatus('error', 'error');
+    log('Request failed: ' + err.message, 'err');
+    document.getElementById('btnRun').disabled = false;
+  });
+});
+
+document.getElementById('btnDownload').addEventListener('click', () => { window.location = '/api/download'; });
+</script>
+</body>
+</html>
