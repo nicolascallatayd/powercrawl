@@ -24,7 +24,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DELAY_MS = 1500;
-const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet";
+const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const FALLBACK_ANTHROPIC_MODELS = [
   "claude-3-5-sonnet-latest",
   "claude-3-5-haiku-latest",
@@ -79,8 +79,6 @@ async function createAnthropicMessage(client, prompt, onFallback) {
 }
 
 // ── In-flight guard ────────────────────────────────────────────────────────────
-// /api/detect and /api/scrape both read/write the same config/output files, so
-// only one may run at a time.
 let busy = false;
 
 function truncate(str, max = 5000) {
@@ -91,7 +89,7 @@ function truncate(str, max = 5000) {
     : content;
 }
 
-// ── SSE helper ────────────────────────────────────────────────────────────────
+// ── SSE helpers ───────────────────────────────────────────────────────────────
 function sseSetup(res) {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -109,8 +107,179 @@ function buildHeuristicConfig(startUrl) {
     company_links: "a[href]",
     website_url: "a[href]",
     next_page: null,
+    extraction_mode: "profile",
     notes: "heuristic fallback because Anthropic model detection failed",
   };
+}
+
+// ── FIX 1: Smarter candidate page discovery ───────────────────────────────────
+// Instead of blindly taking the first 5 internal links (which are usually nav
+// links like /about, /contact), score each link by how much it looks like a
+// category listing URL and pick the best candidates.
+function scoreLinkAsCategory(href) {
+  let score = 0;
+  // Path segments that strongly suggest a category listing
+  if (/categor|industry|sector|product|listing|index|search|browse/i.test(href))
+    score += 3;
+  // Has a numeric ID in the path — common in B2B directories
+  if (/\/\d+/.test(href)) score += 2;
+  // Has a slug-like segment
+  if (/-[a-z]/.test(href)) score += 1;
+  // Penalise obvious non-listing pages
+  if (
+    /about|contact|login|signup|register|advertis|privacy|terms|faq|help|blog|news|sitemap/i.test(
+      href,
+    )
+  )
+    score -= 5;
+  // Penalise file extensions that aren't HTML
+  if (/\.(pdf|jpg|png|gif|css|js|xml|zip)$/i.test(href)) score -= 5;
+  return score;
+}
+
+function pickCategoryPageCandidates(links, startUrl, n = 10) {
+  const origin = new URL(startUrl).origin;
+  return links
+    .filter((l) => l.startsWith(origin) && l !== startUrl)
+    .map((l) => ({ url: l, score: scoreLinkAsCategory(l) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n)
+    .map((x) => x.url);
+}
+
+// ── FIX 2: Inline website URL extraction ─────────────────────────────────────
+// Many B2B directories (e.g. yellowpages.com.vn) show the company website URL
+// directly on the listing page, not on the individual company profile.
+// extraction_mode: "inline" → grab URLs from the listing page itself.
+// extraction_mode: "profile" (default) → visit each company profile page.
+function extractInlineWebsiteUrls(html, listingPageUrl, config) {
+  const $ = cheerio.load(html);
+  const directoryHostname = new URL(config.start_url).hostname;
+  const seen = new Set();
+  const urls = [];
+
+  // Use website_url selector if it's specific enough (not just "a[href]")
+  const selector =
+    config.website_url && config.website_url !== "a[href]"
+      ? config.website_url
+      : "a[href]";
+
+  $(selector).each((_, el) => {
+    let href = $(el).attr("href") || "";
+    href = href.trim();
+    if (
+      !href ||
+      href.startsWith("#") ||
+      href.startsWith("mailto:") ||
+      href.startsWith("tel:")
+    )
+      return;
+    if (!/^https?:\/\//i.test(href)) {
+      // Try to resolve relative — but skip if it resolves to the same domain
+      try {
+        href = new URL(href, listingPageUrl).href;
+      } catch {
+        return;
+      }
+    }
+    try {
+      const h = new URL(href).hostname.replace(/^www\./, "");
+      const dir = directoryHostname.replace(/^www\./, "");
+      // Must be an external domain
+      if (h === dir || h.endsWith("." + dir)) return;
+    } catch {
+      return;
+    }
+    // Skip images, docs, sister-site banners, social platforms
+    if (/\.(jpg|jpeg|png|gif|svg|webp|pdf|zip|css|js)$/i.test(href)) return;
+    if (
+      /facebook\.com|twitter\.com|linkedin\.com|instagram\.com|youtube\.com/i.test(
+        href,
+      )
+    )
+      return;
+    if (!seen.has(href)) {
+      seen.add(href);
+      urls.push(href);
+    }
+  });
+
+  return urls;
+}
+
+// ── FIX 3: Robust next-page detection ────────────────────────────────────────
+// Handles: rel=next, ?page=N, /page/N, explicit next-link selector.
+function findNextPage($, currentUrl, nextPageSelector) {
+  // 1. Explicit CSS selector from config
+  if (nextPageSelector) {
+    const href = $(nextPageSelector).attr("href");
+    if (href) {
+      const full = abs(href, currentUrl);
+      if (full && full !== currentUrl) return full;
+    }
+  }
+
+  // 2. <link rel="next">
+  const relNext = $('link[rel="next"]').attr("href");
+  if (relNext) {
+    const full = abs(relNext, currentUrl);
+    if (full && full !== currentUrl) return full;
+  }
+
+  // 3. <a rel="next"> or aria-label="Next"
+  const anchorNext =
+    $('a[rel="next"]').attr("href") ||
+    $('a[aria-label="Next"]').attr("href") ||
+    $('a[aria-label="next"]').attr("href");
+  if (anchorNext) {
+    const full = abs(anchorNext, currentUrl);
+    if (full && full !== currentUrl) return full;
+  }
+
+  // 4. Anchor whose text is exactly "Next" / "›" / "»"
+  let nextFromText = null;
+  $("a").each((_, el) => {
+    const text = $(el).text().trim();
+    if (/^(next|›|»|>)$/i.test(text)) {
+      const href = $(el).attr("href");
+      if (href) {
+        const full = abs(href, currentUrl);
+        if (full && full !== currentUrl) {
+          nextFromText = full;
+          return false;
+        }
+      }
+    }
+  });
+  if (nextFromText) return nextFromText;
+
+  // 5. ?page=N increment
+  try {
+    const u = new URL(currentUrl);
+    const currentPage = parseInt(u.searchParams.get("page") || "1", 10);
+    const nextPage = currentPage + 1;
+    // Only follow if there's a link on the page pointing to page N+1
+    let found = null;
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href") || "";
+      try {
+        const candidate = new URL(href, currentUrl);
+        if (
+          parseInt(candidate.searchParams.get("page") || "0", 10) === nextPage
+        ) {
+          found = candidate.href;
+          return false;
+        }
+      } catch {
+        /* skip */
+      }
+    });
+    if (found) return found;
+  } catch {
+    /* not a valid URL */
+  }
+
+  return null;
 }
 
 export function createApp() {
@@ -163,39 +332,51 @@ export function createApp() {
         return res.end();
       }
 
-      const origin = new URL(startUrl).origin;
+      // FIX 1: Use scored candidate selection instead of first-5-links
       const $home = cheerio.load(homeHtml);
-      const candidateLinks = collectLinks(
-        $home,
-        startUrl,
-        "a[href]",
-        (full) => full !== startUrl && full.startsWith(origin),
-      );
+      const allLinks = collectLinks($home, startUrl, "a[href]", () => true);
+      const candidateLinks = pickCategoryPageCandidates(allLinks, startUrl, 10);
 
       let categoryPageHtml = null,
         categoryPageUrl = null;
-      for (const link of candidateLinks.slice(0, 5)) {
+      for (const link of candidateLinks) {
         await sleep(DELAY_MS);
         sseSend(res, "log", { msg: `Trying category page: ${link}` });
         const html = await fetchPage(link);
         if (html && html.length > 2000) {
-          categoryPageHtml = html;
-          categoryPageUrl = link;
-          break;
+          // Make sure this page actually has multiple links (looks like a listing)
+          const $tmp = cheerio.load(html);
+          const linkCount = $tmp("a[href]").length;
+          if (linkCount >= 5) {
+            categoryPageHtml = html;
+            categoryPageUrl = link;
+            break;
+          }
         }
       }
 
+      // Try to find a company profile page from the listing page
       let companyPageHtml = null,
         companyPageUrl = null;
       if (categoryPageHtml) {
         const $cat = cheerio.load(categoryPageHtml);
+        // Score candidates differently: company profiles often have longer paths / IDs
         const compCandidates = collectLinks(
           $cat,
           categoryPageUrl,
           "a[href]",
-          (full) => full !== categoryPageUrl,
+          (full) => {
+            if (full === categoryPageUrl) return false;
+            try {
+              const u = new URL(full);
+              // Prefer links with numeric IDs or deeper paths
+              return u.pathname.split("/").length >= 3;
+            } catch {
+              return false;
+            }
+          },
         );
-        for (const link of compCandidates.slice(0, 5)) {
+        for (const link of compCandidates.slice(0, 8)) {
           await sleep(DELAY_MS);
           sseSend(res, "log", { msg: `Trying company page: ${link}` });
           const html = await fetchPage(link);
@@ -211,22 +392,36 @@ export function createApp() {
         msg: "Asking Claude to analyse site structure...",
       });
 
-      const prompt = `You are analysing a B2B directory website. Return ONLY valid JSON, no markdown fences:
+      // FIX 2: Enhanced prompt — tells Claude about extraction_mode
+      const prompt = `You are analysing a B2B business directory website to extract CSS selectors for automated scraping.
+
+Return ONLY a valid JSON object, no markdown fences, no explanation outside the JSON:
 {
   "start_url": "${startUrl}",
-  "category_links": "CSS selector",
-  "company_links": "CSS selector",
-  "website_url": "CSS selector",
-  "next_page": "CSS selector or null",
-  "notes": "brief notes"
+  "category_links": "CSS selector for links to category/subcategory listing pages",
+  "company_links": "CSS selector for links to individual company profile pages within a listing page",
+  "website_url": "CSS selector for the company external website URL (on the listing page OR on the company profile page)",
+  "next_page": "CSS selector for the next-page pagination link, or null if none",
+  "extraction_mode": "inline OR profile",
+  "notes": "brief notes on the site structure"
 }
 
-PAGE 1 (homepage ${startUrl}):
+CRITICAL — extraction_mode:
+- Use "inline" if company website URLs are visible directly on the category listing page (no need to visit each company profile).
+- Use "profile" if you must visit each company's individual profile page to find their website URL.
+- When in doubt, look at PAGE 2. If you can see external website URLs (e.g. www.somecompany.com) as clickable links on the listing page itself, use "inline".
+
+For category_links: pick the selector that matches links to category/subcategory pages, NOT to company profiles.
+For company_links: pick the selector that matches links to individual company detail pages.
+For website_url: pick the selector that matches the company's own external website anchor tag.
+For next_page: look for a "Next" link, rel=next, or ?page=N / /page/N style link. Return null if there is no pagination.
+
+PAGE 1 — Homepage (${startUrl}):
 ${truncate(homeHtml, 4000)}
 
-${categoryPageHtml ? `PAGE 2 (category ${categoryPageUrl}):\n${truncate(categoryPageHtml, 4000)}` : "PAGE 2: unavailable"}
+${categoryPageHtml ? `PAGE 2 — Category/listing page (${categoryPageUrl}):\n${truncate(categoryPageHtml, 4000)}` : "PAGE 2 — unavailable"}
 
-${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPageHtml, 3000)}` : "PAGE 3: unavailable"}`;
+${companyPageHtml ? `PAGE 3 — Company profile page (${companyPageUrl}):\n${truncate(companyPageHtml, 3000)}` : "PAGE 3 — unavailable"}`;
 
       let config;
       try {
@@ -236,7 +431,7 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
           prompt,
           (attemptedModel, fallbackModel) => {
             sseSend(res, "log", {
-              msg: `Anthropic model ${attemptedModel} was unavailable; retrying with ${fallbackModel}`,
+              msg: `Anthropic model ${attemptedModel} unavailable; retrying with ${fallbackModel}`,
             });
           },
         );
@@ -249,10 +444,12 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
           .trim();
 
         config = JSON.parse(raw);
+        // Default extraction_mode if Claude omitted it
+        if (!config.extraction_mode) config.extraction_mode = "profile";
       } catch (err) {
         config = buildHeuristicConfig(startUrl);
         sseSend(res, "log", {
-          msg: `Anthropic analysis unavailable; using heuristic fallback config: ${err.message}`,
+          msg: `Anthropic analysis unavailable; using heuristic fallback: ${err.message}`,
         });
       }
 
@@ -286,10 +483,18 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
     const out = fs.createWriteStream(getOutputFile(), { flags: "w" });
     let total = 0;
 
+    // FIX 2: Respect extraction_mode
+    const isInline = config.extraction_mode === "inline";
+    const directoryHostname = new URL(config.start_url).hostname;
+
     try {
       sseSend(res, "log", {
         msg: `Discovering categories from ${config.start_url}...`,
       });
+      sseSend(res, "log", {
+        msg: `Extraction mode: ${isInline ? "inline (URLs on listing page)" : "profile (visit each company page)"}`,
+      });
+
       await sleep(DELAY_MS);
       const homeHtml = await fetchPage(config.start_url);
       if (!homeHtml) {
@@ -308,7 +513,7 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
       sseSend(res, "log", { msg: `Found ${catList.length} categories` });
       if (catList.length === 0) {
         sseSend(res, "log", {
-          msg: "WARNING: 0 categories matched category_links selector — check your config",
+          msg: "WARNING: 0 categories matched — check your category_links selector",
           cls: "err",
         });
       }
@@ -330,47 +535,82 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
           if (!html) break;
 
           const $cat = cheerio.load(html);
-          const compLinks = collectLinks(
-            $cat,
-            currentUrl,
-            config.company_links,
-          );
 
-          if (compLinks.length === 0 && page === 1) {
-            sseSend(res, "log", {
-              msg: `  WARNING: 0 companies matched company_links selector on ${currentUrl}`,
-              cls: "err",
-            });
-          }
-          if (compLinks.length === 0 && page > 1) break;
+          if (isInline) {
+            // FIX 2: Extract website URLs directly from the listing page
+            const urls = extractInlineWebsiteUrls(html, currentUrl, config);
+            if (urls.length === 0 && page === 1) {
+              sseSend(res, "log", {
+                msg: `  WARNING: 0 inline URLs found on ${currentUrl} — consider switching to extraction_mode: profile`,
+                cls: "err",
+              });
+            }
+            for (const url of urls) {
+              out.write(url + "\n");
+              total++;
+              sseSend(res, "url", { url, total });
+            }
+          } else {
+            // Profile mode: visit each company page
+            const compLinks = collectLinks(
+              $cat,
+              currentUrl,
+              config.company_links,
+            );
 
-          for (const compUrl of compLinks) {
-            await sleep(DELAY_MS);
-            const compHtml = await fetchPage(compUrl);
-            if (!compHtml) continue;
+            if (compLinks.length === 0 && page === 1) {
+              sseSend(res, "log", {
+                msg: `  WARNING: 0 companies matched company_links on ${currentUrl}`,
+                cls: "err",
+              });
+            }
+            if (compLinks.length === 0 && page > 1) break;
 
-            const $c = cheerio.load(compHtml);
-            const el = $c(config.website_url).first();
-            let websiteUrl = el.attr("href") || el.text().trim();
-            if (websiteUrl) {
-              websiteUrl = websiteUrl.trim();
-              if (!/^https?:\/\//i.test(websiteUrl))
-                websiteUrl = "https://" + websiteUrl;
-              if (!websiteUrl.includes(new URL(config.start_url).hostname)) {
-                out.write(websiteUrl + "\n");
-                total++;
-                sseSend(res, "url", { url: websiteUrl, total });
+            for (const compUrl of compLinks) {
+              // Skip links that point back to the directory itself
+              try {
+                const h = new URL(compUrl).hostname.replace(/^www\./, "");
+                const dir = directoryHostname.replace(/^www\./, "");
+                if (h !== dir && !h.endsWith("." + dir)) {
+                  // This is already an external URL — treat it as the website URL directly
+                  out.write(compUrl + "\n");
+                  total++;
+                  sseSend(res, "url", { url: compUrl, total });
+                  continue;
+                }
+              } catch {
+                continue;
+              }
+
+              await sleep(DELAY_MS);
+              const compHtml = await fetchPage(compUrl);
+              if (!compHtml) continue;
+
+              const $c = cheerio.load(compHtml);
+              const el = $c(config.website_url).first();
+              let websiteUrl = el.attr("href") || el.text().trim();
+              if (websiteUrl) {
+                websiteUrl = websiteUrl.trim();
+                if (!/^https?:\/\//i.test(websiteUrl))
+                  websiteUrl = "https://" + websiteUrl;
+                try {
+                  const h = new URL(websiteUrl).hostname.replace(/^www\./, "");
+                  const dir = directoryHostname.replace(/^www\./, "");
+                  if (h !== dir && !h.endsWith("." + dir)) {
+                    out.write(websiteUrl + "\n");
+                    total++;
+                    sseSend(res, "url", { url: websiteUrl, total });
+                  }
+                } catch {
+                  /* invalid URL, skip */
+                }
               }
             }
           }
 
-          if (config.next_page) {
-            const nextHref = $cat(config.next_page).attr("href");
-            const nextFull = abs(nextHref, currentUrl);
-            currentUrl = nextFull && nextFull !== currentUrl ? nextFull : null;
-          } else {
-            currentUrl = null;
-          }
+          // FIX 3: Robust next-page detection
+          const nextUrl = findNextPage($cat, currentUrl, config.next_page);
+          currentUrl = nextUrl || null;
           page++;
         }
       }
