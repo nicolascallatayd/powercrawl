@@ -24,8 +24,13 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DELAY_MS = 1500;
-const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest";
-const FALLBACK_ANTHROPIC_MODELS = ["claude-3-7-sonnet-latest"];
+const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet";
+const FALLBACK_ANTHROPIC_MODELS = [
+  "claude-3-5-sonnet-latest",
+  "claude-3-7-sonnet-latest",
+  "claude-3-7-sonnet",
+  "claude-3-5-haiku-latest",
+];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -60,15 +65,12 @@ async function createAnthropicMessage(client, prompt, onFallback) {
     } catch (err) {
       lastError = err;
       const isModelNotFound = isModelNotFoundError(err);
-      if (!isModelNotFound || model === uniqueModels[uniqueModels.length - 1]) {
+      const nextModel = uniqueModels[uniqueModels.indexOf(model) + 1];
+      if (!isModelNotFound || !nextModel) {
         throw err;
       }
       if (onFallback) {
-        onFallback(
-          model,
-          uniqueModels[uniqueModels.indexOf(model) + 1] ||
-            DEFAULT_ANTHROPIC_MODEL,
-        );
+        onFallback(model, nextModel);
       }
     }
   }

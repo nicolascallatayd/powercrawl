@@ -256,7 +256,7 @@ describe("detect error handling", () => {
     expect(res.text).toContain('"type":"config"');
     expect(anthropicCreateMock).toHaveBeenCalledTimes(2);
     expect(anthropicCreateMock.mock.calls[1][0].model).toBe(
-      "claude-3-7-sonnet-latest",
+      "claude-3-5-sonnet-latest",
     );
   });
 
