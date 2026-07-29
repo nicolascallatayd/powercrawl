@@ -11,16 +11,22 @@ import request from "supertest";
 // pulls these modules in during ESM linking, silently falling through to the
 // real (unmocked) module instead.
 const { fetchPageMock, anthropicCreateMock } = vi.hoisted(() => ({
-  fetchPageMock: vi.fn(async (url) => `<html><body>fake page for ${url}</body></html>`),
+  fetchPageMock: vi.fn(
+    async (url) => `<html><body>fake page for ${url}</body></html>`,
+  ),
   anthropicCreateMock: vi.fn(async () => ({
-    content: [{ text: JSON.stringify({
-      start_url: "https://example.com",
-      category_links: "a.cat",
-      company_links: "a.company",
-      website_url: "a.site",
-      next_page: null,
-      notes: "mocked",
-    }) }],
+    content: [
+      {
+        text: JSON.stringify({
+          start_url: "https://example.com",
+          category_links: "a.cat",
+          company_links: "a.company",
+          website_url: "a.site",
+          next_page: null,
+          notes: "mocked",
+        }),
+      },
+    ],
   })),
 }));
 
@@ -28,13 +34,16 @@ vi.mock("../lib/httpFetch.js", () => ({
   fetchPage: (...args) => fetchPageMock(...args),
 }));
 vi.mock("../lib/anthropicClient.js", () => ({
-  createClient: () => ({ messages: { create: (...args) => anthropicCreateMock(...args) } }),
+  createClient: () => ({
+    messages: { create: (...args) => anthropicCreateMock(...args) },
+  }),
 }));
 
 import { createApp } from "../app.js";
 
 const ORIGINAL_DATA_DIR = process.env.POWERCRAWL_DATA_DIR;
 const ORIGINAL_APP_PASSWORD = process.env.APP_PASSWORD;
+const ORIGINAL_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL;
 
 let tmpDataDir;
 let app;
@@ -43,6 +52,22 @@ beforeEach(async () => {
   tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "powercrawl-app-test-"));
   process.env.POWERCRAWL_DATA_DIR = tmpDataDir;
   process.env.APP_PASSWORD = "test-password";
+  delete process.env.ANTHROPIC_MODEL;
+  anthropicCreateMock.mockReset();
+  anthropicCreateMock.mockResolvedValue({
+    content: [
+      {
+        text: JSON.stringify({
+          start_url: "https://example.com",
+          category_links: "a.cat",
+          company_links: "a.company",
+          website_url: "a.site",
+          next_page: null,
+          notes: "mocked",
+        }),
+      },
+    ],
+  });
   app = createApp();
 });
 
@@ -50,10 +75,17 @@ afterEach(() => {
   fs.rmSync(tmpDataDir, { recursive: true, force: true });
   process.env.POWERCRAWL_DATA_DIR = ORIGINAL_DATA_DIR;
   process.env.APP_PASSWORD = ORIGINAL_APP_PASSWORD;
+  if (ORIGINAL_ANTHROPIC_MODEL === undefined) {
+    delete process.env.ANTHROPIC_MODEL;
+  } else {
+    process.env.ANTHROPIC_MODEL = ORIGINAL_ANTHROPIC_MODEL;
+  }
 });
 
 async function login(agent) {
-  const res = await agent.post("/api/login").send({ password: "test-password" });
+  const res = await agent
+    .post("/api/login")
+    .send({ password: "test-password" });
   expect(res.status).toBe(200);
 }
 
@@ -64,7 +96,9 @@ describe("auth gate", () => {
   });
 
   it("401s /api/login with the wrong password", async () => {
-    const res = await request(app).post("/api/login").send({ password: "nope" });
+    const res = await request(app)
+      .post("/api/login")
+      .send({ password: "nope" });
     expect(res.status).toBe(401);
   });
 
@@ -88,7 +122,9 @@ describe("config validation", () => {
   it("rejects saving a config missing required selectors", async () => {
     const agent = request.agent(app);
     await login(agent);
-    const res = await agent.post("/api/config").send({ category_links: "a.cat" });
+    const res = await agent
+      .post("/api/config")
+      .send({ category_links: "a.cat" });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/company_links/);
     expect(res.body.error).toMatch(/website_url/);
@@ -97,7 +133,11 @@ describe("config validation", () => {
   it("saves and reads back a valid config", async () => {
     const agent = request.agent(app);
     await login(agent);
-    const cfg = { category_links: "a.cat", company_links: "a.company", website_url: "a.site" };
+    const cfg = {
+      category_links: "a.cat",
+      company_links: "a.company",
+      website_url: "a.site",
+    };
     const saveRes = await agent.post("/api/config").send(cfg);
     expect(saveRes.status).toBe(200);
     const readRes = await agent.get("/api/config");
@@ -119,7 +159,9 @@ describe("concurrency guard", () => {
     const agent = request.agent(app);
     await login(agent);
     await agent.post("/api/config").send({
-      category_links: "a.cat", company_links: "a.company", website_url: "a.site",
+      category_links: "a.cat",
+      company_links: "a.company",
+      website_url: "a.site",
       start_url: "https://example.com",
     });
 
@@ -142,7 +184,9 @@ describe("scrape edge cases", () => {
     const agent = request.agent(app);
     await login(agent);
     await agent.post("/api/config").send({
-      category_links: "a.cat", company_links: "a.company", website_url: "a.site",
+      category_links: "a.cat",
+      company_links: "a.company",
+      website_url: "a.site",
       start_url: "https://example.com",
     });
     const res = await agent.get("/api/scrape");
@@ -158,7 +202,9 @@ describe("detect error handling", () => {
 
     const agent = request.agent(app);
     await login(agent);
-    const res = await agent.get("/api/detect").query({ url: "https://unreachable.example" });
+    const res = await agent
+      .get("/api/detect")
+      .query({ url: "https://unreachable.example" });
     expect(res.status).toBe(200);
     expect(res.text).toContain("Could not fetch URL");
   });
@@ -168,15 +214,58 @@ describe("detect error handling", () => {
 
     const agent = request.agent(app);
     await login(agent);
-    const res = await agent.get("/api/detect").query({ url: "https://example.com" });
+    const res = await agent
+      .get("/api/detect")
+      .query({ url: "https://example.com" });
     expect(res.status).toBe(200);
     expect(res.text).toContain('"type":"error"');
+  });
+
+  it("falls back to a supported model when the preferred model is not found", async () => {
+    process.env.ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+    const unsupportedError = Object.assign(
+      new Error("model: claude-sonnet-4-20250514"),
+      {
+        status: 404,
+        type: "not_found_error",
+      },
+    );
+    anthropicCreateMock
+      .mockRejectedValueOnce(unsupportedError)
+      .mockResolvedValueOnce({
+        content: [
+          {
+            text: JSON.stringify({
+              start_url: "https://example.com",
+              category_links: "a.cat",
+              company_links: "a.company",
+              website_url: "a.site",
+              next_page: null,
+              notes: "fallback",
+            }),
+          },
+        ],
+      });
+
+    const agent = request.agent(app);
+    await login(agent);
+    const res = await agent
+      .get("/api/detect")
+      .query({ url: "https://example.com" });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('"type":"config"');
+    expect(anthropicCreateMock).toHaveBeenCalledTimes(2);
+    expect(anthropicCreateMock.mock.calls[1][0].model).toBe(
+      "claude-3-5-sonnet-20241022",
+    );
   });
 
   it("succeeds and saves config on the happy path", async () => {
     const agent = request.agent(app);
     await login(agent);
-    const res = await agent.get("/api/detect").query({ url: "https://example.com" });
+    const res = await agent
+      .get("/api/detect")
+      .query({ url: "https://example.com" });
     expect(res.status).toBe(200);
     expect(res.text).toContain('"type":"config"');
     expect(res.text).toContain('"type":"done"');

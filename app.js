@@ -24,8 +24,42 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DELAY_MS = 1500;
+const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function createAnthropicMessage(client, prompt, onFallback) {
+  const preferredModel = process.env.ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL;
+  const models = [preferredModel];
+  if (!models.includes(DEFAULT_ANTHROPIC_MODEL)) {
+    models.push(DEFAULT_ANTHROPIC_MODEL);
+  }
+
+  let lastError;
+  for (const model of models) {
+    try {
+      return await client.messages.create({
+        model,
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+      });
+    } catch (err) {
+      lastError = err;
+      const isModelNotFound =
+        err?.status === 404 ||
+        err?.type === "not_found_error" ||
+        /model/i.test(err?.message || "");
+      if (!isModelNotFound || model === models[models.length - 1]) {
+        throw err;
+      }
+      if (onFallback) {
+        onFallback(model, DEFAULT_ANTHROPIC_MODEL);
+      }
+    }
+  }
+
+  throw lastError;
+}
 
 // ── In-flight guard ────────────────────────────────────────────────────────────
 // /api/detect and /api/scrape both read/write the same config/output files, so
@@ -35,7 +69,9 @@ let busy = false;
 function truncate(str, max = 5000) {
   const bodyMatch = str.match(/<body[\s\S]*<\/body>/i);
   const content = bodyMatch ? bodyMatch[0] : str;
-  return content.length > max ? content.slice(0, max) + "\n...[truncated]" : content;
+  return content.length > max
+    ? content.slice(0, max) + "\n...[truncated]"
+    : content;
 }
 
 // ── SSE helper ────────────────────────────────────────────────────────────────
@@ -70,7 +106,9 @@ export function createApp() {
   app.post("/api/config", (req, res) => {
     const missing = validateConfig(req.body);
     if (missing.length > 0) {
-      return res.status(400).json({ error: `Missing required selector(s): ${missing.join(", ")}` });
+      return res
+        .status(400)
+        .json({ error: `Missing required selector(s): ${missing.join(", ")}` });
     }
     writeConfig(req.body);
     res.json({ ok: true });
@@ -81,7 +119,10 @@ export function createApp() {
     const startUrl = req.query.url;
     if (!startUrl) return res.status(400).json({ error: "url required" });
 
-    if (busy) return res.status(409).json({ error: "Another detect/scrape is already running" });
+    if (busy)
+      return res
+        .status(409)
+        .json({ error: "Another detect/scrape is already running" });
     busy = true;
 
     sseSetup(res);
@@ -89,39 +130,58 @@ export function createApp() {
       sseSend(res, "log", { msg: `Fetching homepage: ${startUrl}` });
 
       const homeHtml = await fetchPage(startUrl);
-      if (!homeHtml) { sseSend(res, "error", { msg: "Could not fetch URL" }); return res.end(); }
+      if (!homeHtml) {
+        sseSend(res, "error", { msg: "Could not fetch URL" });
+        return res.end();
+      }
 
       const origin = new URL(startUrl).origin;
       const $home = cheerio.load(homeHtml);
       const candidateLinks = collectLinks(
-        $home, startUrl, "a[href]",
-        (full) => full !== startUrl && full.startsWith(origin)
+        $home,
+        startUrl,
+        "a[href]",
+        (full) => full !== startUrl && full.startsWith(origin),
       );
 
-      let categoryPageHtml = null, categoryPageUrl = null;
+      let categoryPageHtml = null,
+        categoryPageUrl = null;
       for (const link of candidateLinks.slice(0, 5)) {
         await sleep(DELAY_MS);
         sseSend(res, "log", { msg: `Trying category page: ${link}` });
         const html = await fetchPage(link);
-        if (html && html.length > 2000) { categoryPageHtml = html; categoryPageUrl = link; break; }
+        if (html && html.length > 2000) {
+          categoryPageHtml = html;
+          categoryPageUrl = link;
+          break;
+        }
       }
 
-      let companyPageHtml = null, companyPageUrl = null;
+      let companyPageHtml = null,
+        companyPageUrl = null;
       if (categoryPageHtml) {
         const $cat = cheerio.load(categoryPageHtml);
         const compCandidates = collectLinks(
-          $cat, categoryPageUrl, "a[href]",
-          (full) => full !== categoryPageUrl
+          $cat,
+          categoryPageUrl,
+          "a[href]",
+          (full) => full !== categoryPageUrl,
         );
         for (const link of compCandidates.slice(0, 5)) {
           await sleep(DELAY_MS);
           sseSend(res, "log", { msg: `Trying company page: ${link}` });
           const html = await fetchPage(link);
-          if (html && html.length > 2000) { companyPageHtml = html; companyPageUrl = link; break; }
+          if (html && html.length > 2000) {
+            companyPageHtml = html;
+            companyPageUrl = link;
+            break;
+          }
         }
       }
 
-      sseSend(res, "log", { msg: "Asking Claude to analyse site structure..." });
+      sseSend(res, "log", {
+        msg: "Asking Claude to analyse site structure...",
+      });
 
       const prompt = `You are analysing a B2B directory website. Return ONLY valid JSON, no markdown fences:
 {
@@ -141,14 +201,22 @@ ${categoryPageHtml ? `PAGE 2 (category ${categoryPageUrl}):\n${truncate(category
 ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPageHtml, 3000)}` : "PAGE 3: unavailable"}`;
 
       const client = createClient();
-      const message = await client.messages.create({
-        model: "claude-3-5-sonnet-20241022",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-      });
+      const message = await createAnthropicMessage(
+        client,
+        prompt,
+        (attemptedModel, fallbackModel) => {
+          sseSend(res, "log", {
+            msg: `Anthropic model ${attemptedModel} was unavailable; retrying with ${fallbackModel}`,
+          });
+        },
+      );
 
-      const raw = message.content[0].text.trim()
-        .replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+      const raw = message.content[0].text
+        .trim()
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
 
       try {
         const config = JSON.parse(raw);
@@ -169,9 +237,15 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
   // ── SCRAPE ────────────────────────────────────────────────────────────────
   app.get("/api/scrape", async (req, res) => {
     const config = readConfig();
-    if (!config) return res.status(400).json({ error: "No config found. Run detect first." });
+    if (!config)
+      return res
+        .status(400)
+        .json({ error: "No config found. Run detect first." });
 
-    if (busy) return res.status(409).json({ error: "Another detect/scrape is already running" });
+    if (busy)
+      return res
+        .status(409)
+        .json({ error: "Another detect/scrape is already running" });
     busy = true;
 
     sseSetup(res);
@@ -180,27 +254,42 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
     let total = 0;
 
     try {
-      sseSend(res, "log", { msg: `Discovering categories from ${config.start_url}...` });
+      sseSend(res, "log", {
+        msg: `Discovering categories from ${config.start_url}...`,
+      });
       await sleep(DELAY_MS);
       const homeHtml = await fetchPage(config.start_url);
-      if (!homeHtml) { sseSend(res, "error", { msg: "Could not fetch start URL" }); return res.end(); }
+      if (!homeHtml) {
+        sseSend(res, "error", { msg: "Could not fetch start URL" });
+        return res.end();
+      }
 
       const $home = cheerio.load(homeHtml);
       const catList = collectLinks(
-        $home, config.start_url, config.category_links,
-        (full) => full !== config.start_url
+        $home,
+        config.start_url,
+        config.category_links,
+        (full) => full !== config.start_url,
       );
 
       sseSend(res, "log", { msg: `Found ${catList.length} categories` });
       if (catList.length === 0) {
-        sseSend(res, "log", { msg: "WARNING: 0 categories matched category_links selector — check your config", cls: "err" });
+        sseSend(res, "log", {
+          msg: "WARNING: 0 categories matched category_links selector — check your config",
+          cls: "err",
+        });
       }
 
       for (let ci = 0; ci < catList.length; ci++) {
         const catUrl = catList[ci];
-        sseSend(res, "category", { msg: `[${ci + 1}/${catList.length}] ${catUrl}`, index: ci + 1, total: catList.length });
+        sseSend(res, "category", {
+          msg: `[${ci + 1}/${catList.length}] ${catUrl}`,
+          index: ci + 1,
+          total: catList.length,
+        });
 
-        let currentUrl = catUrl, page = 1;
+        let currentUrl = catUrl,
+          page = 1;
         while (currentUrl) {
           await sleep(DELAY_MS);
           sseSend(res, "log", { msg: `  Page ${page}: ${currentUrl}` });
@@ -208,10 +297,17 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
           if (!html) break;
 
           const $cat = cheerio.load(html);
-          const compLinks = collectLinks($cat, currentUrl, config.company_links);
+          const compLinks = collectLinks(
+            $cat,
+            currentUrl,
+            config.company_links,
+          );
 
           if (compLinks.length === 0 && page === 1) {
-            sseSend(res, "log", { msg: `  WARNING: 0 companies matched company_links selector on ${currentUrl}`, cls: "err" });
+            sseSend(res, "log", {
+              msg: `  WARNING: 0 companies matched company_links selector on ${currentUrl}`,
+              cls: "err",
+            });
           }
           if (compLinks.length === 0 && page > 1) break;
 
@@ -225,7 +321,8 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
             let websiteUrl = el.attr("href") || el.text().trim();
             if (websiteUrl) {
               websiteUrl = websiteUrl.trim();
-              if (!/^https?:\/\//i.test(websiteUrl)) websiteUrl = "https://" + websiteUrl;
+              if (!/^https?:\/\//i.test(websiteUrl))
+                websiteUrl = "https://" + websiteUrl;
               if (!websiteUrl.includes(new URL(config.start_url).hostname)) {
                 out.write(websiteUrl + "\n");
                 total++;
@@ -245,7 +342,10 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
         }
       }
 
-      sseSend(res, "done", { msg: `Scrape complete. ${total} URLs saved.`, total });
+      sseSend(res, "done", {
+        msg: `Scrape complete. ${total} URLs saved.`,
+        total,
+      });
     } catch (err) {
       sseSend(res, "error", { msg: `Scrape failed: ${err.message}` });
     } finally {
@@ -258,7 +358,8 @@ ${companyPageHtml ? `PAGE 3 (company ${companyPageUrl}):\n${truncate(companyPage
   // ── DOWNLOAD ──────────────────────────────────────────────────────────────
   app.get("/api/download", (req, res) => {
     const outputFile = getOutputFile();
-    if (!fs.existsSync(outputFile)) return res.status(404).send("No output file yet");
+    if (!fs.existsSync(outputFile))
+      return res.status(404).send("No output file yet");
     res.download(outputFile, "leads.txt");
   });
 
