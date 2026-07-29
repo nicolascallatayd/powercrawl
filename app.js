@@ -24,19 +24,33 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DELAY_MS = 1500;
-const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022";
+const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest";
+const FALLBACK_ANTHROPIC_MODELS = ["claude-3-7-sonnet-latest"];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function isModelNotFoundError(err) {
+  if (!err) return false;
+  if (err.status === 404 || err.statusCode === 404) return true;
+  if (err.type === "not_found_error" || err.error?.type === "not_found_error")
+    return true;
+  const message = typeof err.message === "string" ? err.message : "";
+  return (
+    /model/i.test(message) ||
+    /not_found_error/i.test(message) ||
+    /404/i.test(message)
+  );
+}
+
 async function createAnthropicMessage(client, prompt, onFallback) {
   const preferredModel = process.env.ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL;
-  const models = [preferredModel];
-  if (!models.includes(DEFAULT_ANTHROPIC_MODEL)) {
-    models.push(DEFAULT_ANTHROPIC_MODEL);
-  }
+  const models = [preferredModel, ...FALLBACK_ANTHROPIC_MODELS];
+  const uniqueModels = models.filter(
+    (model, index) => models.indexOf(model) === index,
+  );
 
   let lastError;
-  for (const model of models) {
+  for (const model of uniqueModels) {
     try {
       return await client.messages.create({
         model,
@@ -45,15 +59,16 @@ async function createAnthropicMessage(client, prompt, onFallback) {
       });
     } catch (err) {
       lastError = err;
-      const isModelNotFound =
-        err?.status === 404 ||
-        err?.type === "not_found_error" ||
-        /model/i.test(err?.message || "");
-      if (!isModelNotFound || model === models[models.length - 1]) {
+      const isModelNotFound = isModelNotFoundError(err);
+      if (!isModelNotFound || model === uniqueModels[uniqueModels.length - 1]) {
         throw err;
       }
       if (onFallback) {
-        onFallback(model, DEFAULT_ANTHROPIC_MODEL);
+        onFallback(
+          model,
+          uniqueModels[uniqueModels.indexOf(model) + 1] ||
+            DEFAULT_ANTHROPIC_MODEL,
+        );
       }
     }
   }
