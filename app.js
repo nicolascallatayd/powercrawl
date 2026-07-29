@@ -26,10 +26,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DELAY_MS = 1500;
 const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 const FALLBACK_ANTHROPIC_MODELS = [
-  "claude-3-5-sonnet-latest",
-  "claude-3-5-haiku-latest",
-  "claude-3-7-sonnet-latest",
-  "claude-3-7-sonnet",
+  "claude-haiku-4-5-20251001",
+  "claude-opus-4-6",
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
